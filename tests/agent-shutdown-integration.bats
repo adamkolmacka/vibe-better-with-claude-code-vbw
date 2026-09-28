@@ -350,6 +350,78 @@ simulate_session_stop() {
   grep -Fqx '10101 scout' ".vbw-planning/.active-agent-role-pids"
 }
 
+@test "session-stop on Stop keeps fresh registered Dev session state and .agent-panes" {
+  cd "$TEST_TEMP_DIR"
+
+  printf '%s\n' '{"session_id":"session-A","agent_type":"vbw-dev","pid":"30303"}' | \
+    VBW_PLANNING_DIR="$TEST_TEMP_DIR/.vbw-planning" bash "$SCRIPTS_DIR/agent-start.sh"
+  echo "30303 %1" > ".vbw-planning/.agent-panes"
+
+  run bash -c 'printf "%s\n" "{\"session_id\":\"session-A\",\"hook_event_name\":\"Stop\"}" | bash "$1"' _ \
+    "$SCRIPTS_DIR/session-stop.sh"
+  [ "$status" -eq 0 ]
+
+  [ -d ".vbw-planning/.active-agents/session-A" ]
+  [ "$(cat ".vbw-planning/.active-agents/session-A/active-agent-count")" = "1" ]
+  [ -f ".vbw-planning/.agent-panes" ]
+}
+
+@test "session-stop on Stop with zero registered agents removes session state" {
+  cd "$TEST_TEMP_DIR"
+
+  mkdir -p ".vbw-planning/.active-agents/session-A"
+  echo "0" > ".vbw-planning/.active-agents/session-A/active-agent-count"
+  echo "30303 %1" > ".vbw-planning/.agent-panes"
+
+  run bash -c 'printf "%s\n" "{\"session_id\":\"session-A\",\"hook_event_name\":\"Stop\"}" | bash "$1"' _ \
+    "$SCRIPTS_DIR/session-stop.sh"
+  [ "$status" -eq 0 ]
+
+  [ ! -d ".vbw-planning/.active-agents/session-A" ]
+  [ ! -f ".vbw-planning/.agent-panes" ]
+}
+
+@test "session-stop on Stop with state older than 4h removes session state" {
+  cd "$TEST_TEMP_DIR"
+
+  printf '%s\n' '{"session_id":"session-A","agent_type":"vbw-dev","pid":"30303"}' | \
+    VBW_PLANNING_DIR="$TEST_TEMP_DIR/.vbw-planning" bash "$SCRIPTS_DIR/agent-start.sh"
+  echo "30303 %1" > ".vbw-planning/.agent-panes"
+  local stale_ts
+  stale_ts=$(date -r $(( $(date +%s) - 18000 )) +%Y%m%d%H%M 2>/dev/null \
+    || date -d "@$(( $(date +%s) - 18000 ))" +%Y%m%d%H%M)
+  touch -t "$stale_ts" .vbw-planning/.active-agents/session-A/*
+
+  run bash -c 'printf "%s\n" "{\"session_id\":\"session-A\",\"hook_event_name\":\"Stop\"}" | bash "$1"' _ \
+    "$SCRIPTS_DIR/session-stop.sh"
+  [ "$status" -eq 0 ]
+
+  [ ! -d ".vbw-planning/.active-agents/session-A" ]
+  [ ! -f ".vbw-planning/.agent-panes" ]
+}
+
+@test "session-stop on SessionEnd removes session state even with registered agents" {
+  cd "$TEST_TEMP_DIR"
+
+  printf '%s\n' '{"session_id":"session-A","agent_type":"vbw-dev","pid":"30303"}' | \
+    VBW_PLANNING_DIR="$TEST_TEMP_DIR/.vbw-planning" bash "$SCRIPTS_DIR/agent-start.sh"
+  echo "30303 %1" > ".vbw-planning/.agent-panes"
+  [ "$(cat ".vbw-planning/.active-agents/session-A/active-agent-count")" = "1" ]
+
+  run bash -c 'printf "%s\n" "{\"session_id\":\"session-A\",\"hook_event_name\":\"SessionEnd\"}" | bash "$1"' _ \
+    "$SCRIPTS_DIR/session-stop.sh"
+  [ "$status" -eq 0 ]
+
+  [ ! -d ".vbw-planning/.active-agents/session-A" ]
+  [ ! -f ".vbw-planning/.agent-panes" ]
+}
+
+@test "hooks.json registers session-stop.sh on SessionEnd" {
+  local hooks_json="$PROJECT_ROOT/hooks/hooks.json"
+  run jq -e '[.hooks.SessionEnd[]?.hooks[]?.command | select(test("session-stop\\.sh"))] | length > 0' "$hooks_json"
+  [ "$status" -eq 0 ]
+}
+
 @test "tmux-watchdog detach cleanup removes stale active-agent role markers" {
   cd "$TEST_TEMP_DIR"
   local fakebin dead_pid test_input

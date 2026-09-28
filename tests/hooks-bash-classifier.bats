@@ -179,9 +179,9 @@ run_scout_bash_guard() {
   [ "$COUNT" -eq 1 ]
 }
 
-@test "documented scripts: session-stop.sh appears 1x" {
+@test "documented scripts: session-stop.sh appears 2x (Stop + SessionEnd)" {
   COUNT=$(grep -c 'session-stop.sh' "$PROJECT_ROOT/hooks/hooks.json")
-  [ "$COUNT" -eq 1 ]
+  [ "$COUNT" -eq 2 ]
 }
 
 @test "documented scripts: prompt-preflight.sh appears 1x" {

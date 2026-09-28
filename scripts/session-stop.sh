@@ -1,6 +1,6 @@
 #!/bin/bash
 set -u
-# Stop hook: Log session metrics to .vbw-planning/.session-log.jsonl
+# Stop and SessionEnd hook: Log session metrics to .vbw-planning/.session-log.jsonl
 # Non-blocking, fail-open (always exit 0)
 
 # Resolve VBW workspace root (issue #258: bare .vbw-planning/ fails in monorepo submodules)
@@ -76,12 +76,32 @@ if [ -f "$DELEGATED_MARKER" ] && [ -f "$SCRIPT_DIR_STOP/delegated-workflow.sh" ]
     fi
   fi
 fi
-if command -v vbw_active_agent_remove_current_session >/dev/null 2>&1; then
-  vbw_active_agent_remove_current_session "$PLANNING_DIR" "$INPUT"
-else
-  rm -f "$PLANNING_DIR/.active-agent" "$PLANNING_DIR/.active-agent-count" "$PLANNING_DIR/.active-agent-roles" "$PLANNING_DIR/.active-agent-role-pids" 2>/dev/null || true
+# Stop fires at the end of every assistant turn, not at session end. Background
+# subagents outlive the orchestrator's turn, so on Stop keep this session's
+# active-agent state (and .agent-panes) while registered agents are fresh.
+# 4h matches file-guard.sh's execution-state staleness check. SessionEnd (and
+# input without hook_event_name) always cleans up.
+HOOK_EVENT=$(echo "$INPUT" | jq -r '.hook_event_name // empty' 2>/dev/null || echo "")
+KEEP_ACTIVE_AGENTS=false
+if [ "$HOOK_EVENT" = "Stop" ] \
+  && command -v vbw_active_agent_current_count >/dev/null 2>&1 \
+  && command -v vbw_active_agent_current_marker_fresh >/dev/null 2>&1; then
+  _stop_agent_count=$(vbw_active_agent_current_count "$PLANNING_DIR" "$INPUT" 2>/dev/null || echo 0)
+  if [ "${_stop_agent_count:-0}" -gt 0 ] 2>/dev/null \
+    && vbw_active_agent_current_marker_fresh "$PLANNING_DIR" "$INPUT" 14400; then
+    KEEP_ACTIVE_AGENTS=true
+  fi
 fi
-rm -f "$PLANNING_DIR/.agent-panes" "$PLANNING_DIR/.task-verify-seen" 2>/dev/null
+
+if [ "$KEEP_ACTIVE_AGENTS" != true ]; then
+  if command -v vbw_active_agent_remove_current_session >/dev/null 2>&1; then
+    vbw_active_agent_remove_current_session "$PLANNING_DIR" "$INPUT"
+  else
+    rm -f "$PLANNING_DIR/.active-agent" "$PLANNING_DIR/.active-agent-count" "$PLANNING_DIR/.active-agent-roles" "$PLANNING_DIR/.active-agent-role-pids" 2>/dev/null || true
+  fi
+  rm -f "$PLANNING_DIR/.agent-panes" 2>/dev/null
+fi
+rm -f "$PLANNING_DIR/.task-verify-seen" 2>/dev/null
 rm -f "$PLANNING_DIR/.context-usage" 2>/dev/null || true
 rm -rf "$PLANNING_DIR/.compacting" 2>/dev/null || true
 
