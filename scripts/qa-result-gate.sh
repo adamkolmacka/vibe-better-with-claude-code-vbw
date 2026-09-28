@@ -534,6 +534,51 @@ paths_include_original_plan_artifact() {
   return 1
 }
 
+# Documentation files the phase's original execution delivered. In a docs-only
+# phase these docs are the implementation, so a remediation code-fix that edits
+# them is a real change, not metadata. Evidence is taken from git, not from
+# editable planning text: files changed by commits recorded in phase-root
+# SUMMARY.md commit_hashes that are ancestors of the round-start commit, so a
+# remediation round cannot promote a doc by editing plan or summary lists.
+PHASE_DELIVERED_DOC_PATHS=""
+
+collect_phase_delivered_doc_paths() {
+  local phase_dir="${1:-}"
+  local repo_root="${2:-}"
+  local round_anchor_commit="${3:-}"
+  local summary commit_hash path
+  [ -n "$phase_dir" ] || return 0
+  [ -n "$repo_root" ] || return 0
+  [ -n "$round_anchor_commit" ] || return 0
+  git -C "$repo_root" cat-file -e "${round_anchor_commit}^{commit}" 2>/dev/null || return 0
+  while IFS= read -r summary; do
+    [ -f "$summary" ] || continue
+    while IFS= read -r commit_hash; do
+      commit_hash=$(printf '%s' "$commit_hash" | sed "s/^[[:space:]]*//;s/[[:space:]]*$//;s/^['\"]//;s/['\"]$//")
+      [ -n "$commit_hash" ] || continue
+      commit_is_ancestor_or_same "$repo_root" "$commit_hash" "$round_anchor_commit" || continue
+      commit_hashes_to_changed_files "$repo_root" "$commit_hash"
+    done < <(extract_frontmatter_array_items "$summary" commit_hashes)
+  done < <(find "$phase_dir" -maxdepth 1 ! -name '.*' \( -name '*-SUMMARY.md' -o -name 'SUMMARY.md' \) 2>/dev/null) \
+    | canonicalize_recorded_paths "$phase_dir" \
+    | while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        case "$path" in
+          .vbw-planning/*|.claude/*|*/.vbw-planning/*) continue ;;
+        esac
+        path_is_recorded_non_code_artifact "$path" && continue
+        path_is_documentation_artifact "$path" || continue
+        printf '%s\n' "$path"
+      done
+}
+
+path_is_phase_delivered_doc() {
+  local path="${1:-}"
+  [ -n "$path" ] || return 1
+  [ -n "$PHASE_DELIVERED_DOC_PATHS" ] || return 1
+  printf '%s\n' "$PHASE_DELIVERED_DOC_PATHS" | grep -Fx -- "$path" >/dev/null 2>&1
+}
+
 paths_include_non_metadata() {
   local phase_dir="${1:-}"
   while IFS= read -r path; do
@@ -542,7 +587,7 @@ paths_include_non_metadata() {
     if [ -n "$phase_dir" ]; then
       path=$(canonicalize_phase_path "$path" "$phase_dir")
     fi
-    if ! path_is_metadata_artifact "$path"; then
+    if ! path_is_metadata_artifact "$path" || path_is_phase_delivered_doc "$path"; then
       return 0
     fi
   done
@@ -557,7 +602,7 @@ paths_include_code_fix_evidence() {
     if [ -n "$phase_dir" ]; then
       path=$(canonicalize_phase_path "$path" "$phase_dir")
     fi
-    if ! path_is_code_fix_support_artifact "$path"; then
+    if ! path_is_code_fix_support_artifact "$path" || path_is_phase_delivered_doc "$path"; then
       return 0
     fi
   done
@@ -1770,6 +1815,7 @@ if [ "$IN_REMEDIATION" = "true" ] && [ "$SUMMARY_SCOPE_DIR" != "$PHASE_DIR" ]; t
     ROUND_ACTUAL_DIFF_PATHS_CANONICAL=$(printf '%s\n' "$ROUND_ACTUAL_DIFF_PATHS" | canonicalize_recorded_paths "$PHASE_DIR")
     ROUND_WORKTREE_PATHS_CANONICAL=$(git_current_worktree_paths "$GIT_ROOT" | sed '/^[[:space:]]*$/d' | (sort -u 2>/dev/null || sort -u) | canonicalize_recorded_paths "$PHASE_DIR")
     ROUND_IGNORED_WORKTREE_PATHS_CANONICAL=$(git_ignored_metadata_worktree_paths "$GIT_ROOT" | sed '/^[[:space:]]*$/d' | (sort -u 2>/dev/null || sort -u) | canonicalize_recorded_paths "$PHASE_DIR")
+    PHASE_DELIVERED_DOC_PATHS=$(collect_phase_delivered_doc_paths "$PHASE_DIR" "$GIT_ROOT" "$ROUND_STARTED_AT_COMMIT" | (sort -u 2>/dev/null || sort -u))
   fi
 fi
 
@@ -2069,6 +2115,8 @@ case "$RESULT" in
     elif [ "$METADATA_ONLY_ROUND" = "true" ]; then
       # 5c. Remediation round made no implementation/config changes — only
       # metadata/planning/documentation updates. Re-check phase-level deviations.
+      # Docs the phase's original execution delivered (PHASE_DELIVERED_DOC_PATHS)
+      # count as implementation, so docs-only phases can close code-fix rounds.
       # Metadata-only rounds are invalid when they still claim a code-fix path.
       # Pure plan-amendment rounds can resolve cleanly when the original plan was
       # actually updated. Pure process-exception rounds can resolve cleanly only

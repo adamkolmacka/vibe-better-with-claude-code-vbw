@@ -2340,6 +2340,92 @@ VERIF
   [[ "$output" == *"qa_gate_routing=REMEDIATION_REQUIRED"* ]]
 }
 
+# Helper: docs-only phase whose original plan 01-01 committed $1, followed by a
+# code-fix remediation round that commits an edit to $2.
+setup_docs_phase_code_fix_round() {
+  local delivered_doc="$1"
+  local round_doc="$2"
+  local delivered_commit baseline_commit round_commit
+  init_git_repo
+  delivered_commit=$(commit_repo_file "$delivered_doc" "original doc")
+  baseline_commit="$delivered_commit"
+  {
+    echo "---"
+    echo "plan: 01-01"
+    echo "status: complete"
+    echo "commit_hashes:"
+    echo "  - $delivered_commit"
+    echo "deviations: []"
+    echo "---"
+  } > "$PHASE_DIR/01-01-SUMMARY.md"
+  create_verif "write-verification.sh" "FAIL" "## Must-Have Checks
+| ID | Category | Description | Status | Evidence |
+|----|----------|-------------|--------|----------|
+| FAIL-0101 | must_have | Doc must name the screen | FAIL | Missing |" "$baseline_commit"
+
+  mkdir -p "$PHASE_DIR/remediation/qa/round-01"
+  printf 'stage=verify\nround=01\nround_started_at_commit=%s\n' "$baseline_commit" > "$PHASE_DIR/remediation/qa/.qa-remediation-stage"
+  round_commit=$(commit_repo_file "$round_doc" "fixed doc")
+  create_round_summary_with_files "$PHASE_DIR/remediation/qa/round-01" "01" \
+    "  - \"$round_doc\"" "  - $round_commit"
+
+  cat > "$PHASE_DIR/remediation/qa/round-01/R01-PLAN.md" <<'PLAN'
+---
+round: 01
+title: Fix the phase deliverable doc
+fail_classifications:
+  - {id: "FAIL-0101", type: "code-fix", rationale: "The delivered doc must name the screen"}
+---
+PLAN
+  cat > "$PHASE_DIR/remediation/qa/round-01/R01-VERIFICATION.md" <<'VERIF'
+---
+writer: write-verification.sh
+result: PASS
+plans_verified:
+  - R01
+---
+## Checks
+| ID | Category | Description | Status | Evidence |
+|----|----------|-------------|--------|----------|
+| MH-01 | must_have | Doc names the screen | PASS | Done |
+VERIF
+  printf '%s\n' "$round_commit"
+}
+
+@test "code-fix round editing a doc the phase delivered → PROCEED_TO_UAT" {
+  setup_docs_phase_code_fix_round "docs/design/app.md" "docs/design/app.md" >/dev/null
+
+  run bash "$SCRIPT" "$PHASE_DIR"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"qa_gate_metadata_only_override=true"* ]]
+  [[ "$output" == *"qa_gate_routing=PROCEED_TO_UAT"* ]]
+}
+
+@test "code-fix round editing a doc the phase did not deliver → metadata-only override" {
+  setup_docs_phase_code_fix_round "docs/design/app.md" "docs/design/other.md" >/dev/null
+
+  run bash "$SCRIPT" "$PHASE_DIR"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"qa_gate_metadata_only_override=true"* ]]
+  [[ "$output" == *"qa_gate_routing=REMEDIATION_REQUIRED"* ]]
+}
+
+@test "round commit added to a phase summary does not make its doc a phase deliverable" {
+  local round_commit
+  round_commit=$(setup_docs_phase_code_fix_round "docs/design/app.md" "docs/design/other.md")
+  # Round tampers with the phase-root summary to claim its own commit.
+  printf -- '---\nplan: 01-02\nstatus: complete\ncommit_hashes:\n  - %s\ndeviations: []\n---\n' \
+    "$round_commit" > "$PHASE_DIR/01-02-SUMMARY.md"
+
+  run bash "$SCRIPT" "$PHASE_DIR"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"qa_gate_metadata_only_override=true"* ]]
+  [[ "$output" == *"qa_gate_routing=REMEDIATION_REQUIRED"* ]]
+}
+
 @test "plan-amendment without required source plan edit → REMEDIATION_REQUIRED" {
   create_verif "write-verification.sh" "FAIL" "## Must-Have Checks
 | ID | Category | Description | Status | Evidence |
